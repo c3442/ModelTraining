@@ -28,21 +28,19 @@ Images live in S3 at:
 
 import argparse
 import json
-import os
-from typing import List, Dict
+from typing import Dict, List, Sequence, Union
 
-import torch
-from datasets import Dataset
-from PIL import Image
 import fsspec
+import torch
+from PIL import Image
+from datasets import Dataset
+from peft import LoraConfig
 from transformers import (
     AutoProcessor,
     AutoModelForImageTextToText,
     BitsAndBytesConfig,
 )
-from peft import LoraConfig
 from trl import SFTConfig, SFTTrainer
-
 
 # ---------------------------------------------------------------------------
 # Defaults – tweak if needed
@@ -51,7 +49,12 @@ from trl import SFTConfig, SFTTrainer
 DEFAULT_MODEL_ID = "google/gemma-3-4b-pt"     # vision-capable base
 DEFAULT_PROCESSOR_ID = "google/gemma-3-4b-it"
 
-DEFAULT_TRAIN_JSONL = "s3://8up-model-training/training_nutrition5k/test.jsonl"
+# DEFAULT_TRAIN_JSONL = ["s3://8up-model-training/training_nutrition5k/test.jsonl"]
+DEFAULT_TRAIN_JSONL = [
+    "s3://8up-model-training/training_nutrition5k/batch_0.jsonl",
+    "s3://8up-model-training/training_nutrition5k/batch_1.jsonl",
+    "s3://8up-model-training/training_nutrition5k/batch_2.jsonl",
+]
 DEFAULT_IMAGE_BASE = "s3://8up-model-training/images_nutrition5k"
 DEFAULT_OUTPUT_DIR = "gemma3-nutrition5k-vision-qlora"
 
@@ -60,26 +63,32 @@ DEFAULT_OUTPUT_DIR = "gemma3-nutrition5k-vision-qlora"
 # Data loading from JSONL + S3 paths
 # ---------------------------------------------------------------------------
 
-def load_nutrition5k_jsonl(jsonl_path: str) -> Dataset:
+def load_nutrition5k_jsonl(jsonl_paths: Union[str, Sequence[str]]) -> Dataset:
     """
-    Read a JSONL file where each line is a JSON *array* of messages
-    and wrap it into a Dataset with a single column: "messages".
+    Read one or more JSONL files where each line is a JSON *array* of messages
+    and wrap them into a Dataset with a single column: "messages".
     """
-    fs, _, _ = fsspec.get_fs_token_paths(jsonl_path)
+    if isinstance(jsonl_paths, str):
+        paths: List[str] = [jsonl_paths]
+    else:
+        paths = list(jsonl_paths)
+
     records: List[Dict] = []
 
-    with fs.open(jsonl_path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            messages = json.loads(line)
-            if not isinstance(messages, list):
-                raise ValueError(f"Expected a list of messages per line, got: {type(messages)}")
-            records.append({"messages": messages})
+    for jsonl_path in paths:
+        fs, _, _ = fsspec.get_fs_token_paths(jsonl_path)
+        with fs.open(jsonl_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                messages = json.loads(line)
+                if not isinstance(messages, list):
+                    raise ValueError(f"Expected a list of messages per line, got: {type(messages)}")
+                records.append({"messages": messages})
 
     if not records:
-        raise RuntimeError(f"No records found in {jsonl_path}")
+        raise RuntimeError(f"No records found in {paths}")
 
     return Dataset.from_list(records)
 
@@ -224,6 +233,7 @@ def main():
     parser.add_argument(
         "--train_jsonl",
         type=str,
+        nargs="+",
         default=DEFAULT_TRAIN_JSONL,
         help="Path to JSONL training data (can be s3://...).",
     )
@@ -348,7 +358,7 @@ def main():
         bf16=True,
         max_grad_norm=0.3,
         warmup_ratio=0.03,
-        lr_scheduler_type="constant",
+        lr_scheduler_type="cosine",
         push_to_hub=args_cli.push_to_hub,
         report_to="tensorboard",
         gradient_checkpointing_kwargs={"use_reentrant": False},
