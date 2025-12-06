@@ -6,6 +6,7 @@ S3_PREFIX = "script"  # folder inside the bucket
 
 FILES_TO_UPLOAD = [
     "fine_tune_gemma.py",
+    "eval_gemma.py",
     "requirements.txt",
 ]
 
