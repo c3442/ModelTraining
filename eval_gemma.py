@@ -11,13 +11,14 @@ Writes per-example generations to JSONL and a small metrics JSON.
 
 import argparse
 import datetime as _dt
+import difflib
 import json
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Union
 
-import difflib
 import fsspec
 import torch
 from PIL import Image
@@ -39,7 +40,7 @@ DEFAULT_EVAL_JSONL = [
 DEFAULT_IMAGE_BASE = "s3://8up-model-training/images_nutrition5k"
 DEFAULT_MODEL_DIR = "gemma3-nutrition5k-vision-qlora"  # fine-tuned adapter dir
 DEFAULT_OUTPUT_DIR = "eval-results"
-DEFAULT_BASE_MODEL_ID = "google/gemma-3-4b-pt"
+DEFAULT_BASE_MODEL_ID = "google/gemma-3-4b-it"
 DEFAULT_PROCESSOR_ID = "google/gemma-3-4b-it"
 
 
@@ -141,10 +142,46 @@ def extract_reference_text(messages: List[Dict]) -> str:
     return "\n".join(parts).strip()
 
 
+def extract_json_block(text: str) -> str:
+    """
+    Extracts the FIRST JSON object { ... } from the model output.
+    If none is found, returns the original text stripped.
+    """
+    text = text.strip()
+    # Fast path: already valid JSON
+    try:
+        json.loads(text)
+        return text
+    except Exception:
+        pass
+
+    # Fallback: regex to grab first {...} block
+    match = re.search(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", text, flags=re.DOTALL)
+    if match:
+        return match.group(0).strip()
+    return text
+
+
+def safe_json_loads(text: str):
+    """
+    Returns (success: bool, parsed_json_or_none).
+    """
+    try:
+        return True, json.loads(text)
+    except Exception:
+        return False, None
+
+
+def normalize_json(obj) -> str:
+    """
+    Convert a parsed JSON object to a canonical string for comparison/similarity.
+    """
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
-
 @dataclass
 class ModelBundle:
     model: AutoModelForImageTextToText
@@ -218,11 +255,45 @@ def generate_one(
     Run a single forward generation for one conversation with images.
     """
     image_inputs = load_images_from_messages(messages, image_base_dir)
+
+    unified_content = []
+
+    for msg in messages:
+        if msg["role"] != "user":
+            continue
+
+        for c in msg["content"]:
+            if c["type"] == "image":
+                # This signals Gemma to insert <start_of_image> / <end_of_image>
+                unified_content.append({"type": "image"})
+            elif c["type"] == "text" and c.get("text"):
+                unified_content.append({"type": "text", "text": c["text"]})
+
+    normalized_messages = [
+        {"role": "user", "content": unified_content}
+    ]
+
     prompt = processor.apply_chat_template(
-        messages,
+        normalized_messages,
         add_generation_prompt=True,
         tokenize=False,
     )
+
+    # Ensure each image marker is closed with an <end_of_image> token; some
+    # older chat templates omit it, which yields malformed prompts.
+    boi_token = processor.tokenizer.special_tokens_map.get("boi_token", "<start_of_image>")
+    eoi_token = processor.tokenizer.special_tokens_map.get("eoi_token", "<end_of_image>")
+    prompt = re.sub(
+        rf"{re.escape(boi_token)}(?!{re.escape(eoi_token)})",
+        f"{boi_token}{eoi_token}",
+        prompt,
+    )
+
+    # --- DEBUG START ---
+    print("\n" + "=" * 30 + " DEBUG PROMPT " + "=" * 30)
+    print(prompt)
+    print("=" * 74 + "\n")
+    # --- DEBUG END ---
 
     batch = processor(
         text=[prompt],
@@ -231,6 +302,8 @@ def generate_one(
         padding=True,
     )
     batch = to_device(batch, model.device)
+    # Store the length of the input tokens
+    input_len = batch["input_ids"].shape[1]
 
     do_sample = temperature > 0.0
     with torch.inference_mode():
@@ -243,7 +316,10 @@ def generate_one(
             pad_token_id=processor.tokenizer.pad_token_id,
         )
 
-    decoded = processor.batch_decode(outputs, skip_special_tokens=True)
+    # FIX: Slice the outputs to keep only the new tokens
+    generated_ids = outputs[:, input_len:]
+
+    decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)
     return decoded[0].strip()
 
 
@@ -266,6 +342,10 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def strip_assistant_messages(messages):
+    return [m for m in messages if m.get("role") != "assistant"]
 
 
 def evaluate(args: argparse.Namespace) -> None:
@@ -302,32 +382,62 @@ def evaluate(args: argparse.Namespace) -> None:
     with pred_path.open("w") as f_out:
         for idx, example in enumerate(dataset):
             messages = example["messages"]
-            prediction = generate_one(
+
+            # 1) Generate from USER-ONLY messages (no ground truth in prompt)
+            raw_prediction = generate_one(
                 model=model,
                 processor=processor,
-                messages=messages,
+                messages=strip_assistant_messages(messages),
                 image_base_dir=args.image_base_dir,
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_p=args.top_p,
             )
 
-            reference = extract_reference_text(messages)
-            is_json = try_json_parse(prediction)
-            similarity = sequence_similarity(reference, prediction) if reference else 0.0
-            is_exact = bool(reference and prediction.strip() == reference.strip())
+            # 2) Clean prediction: try to extract a JSON object
+            clean_prediction = extract_json_block(raw_prediction)
 
-            total += 0  # no-op; keeps intent clear
+            # 3) Parse prediction JSON (if possible)
+            pred_is_json, pred_obj = safe_json_loads(clean_prediction)
+
+            # 4) Get reference as text (from original messages)
+            reference = extract_reference_text(messages)
+
+            # 5) Parse reference JSON (if possible)
+            ref_is_json, ref_obj = safe_json_loads(reference)
+
+            # 6) Exact match:
+            #    - If both parsed as JSON, use deep equality
+            #    - Otherwise, fallback to string equality (after strip)
+            if pred_is_json and ref_is_json:
+                is_exact = (pred_obj == ref_obj)
+            else:
+                is_exact = bool(reference and clean_prediction.strip() == reference.strip())
+
+            # 7) Similarity:
+            #    - If both JSON, compare normalized JSON strings
+            #    - Else, compare raw strings
+            if pred_is_json and ref_is_json:
+                pred_for_sim = normalize_json(pred_obj)
+                ref_for_sim = normalize_json(ref_obj)
+            else:
+                pred_for_sim = clean_prediction
+                ref_for_sim = reference
+
+            similarity = sequence_similarity(ref_for_sim, pred_for_sim)
+
+            # 8) Metric accumulators
             exact += int(is_exact)
-            json_ok += int(is_json)
+            json_ok += int(pred_is_json)
             sim_sum += similarity
 
             record = {
                 "id": idx,
-                "prediction": prediction,
+                "raw_prediction": raw_prediction,
+                "clean_prediction": clean_prediction,
                 "reference": reference,
                 "messages": messages,
-                "prediction_is_json": is_json,
+                "prediction_is_json": pred_is_json,
                 "exact_match": is_exact,
                 "similarity": similarity,
             }
@@ -342,7 +452,7 @@ def evaluate(args: argparse.Namespace) -> None:
         "exact_match": exact,
         "exact_match_rate": exact / len(dataset) if dataset else 0.0,
         "valid_json": json_ok,
-        "valid_json_rate": json_ok / len(dataset) if dataset else 0.0,
+        "valid_json_rate": json_ok / len(dataset),
         "avg_similarity": sim_sum / len(dataset) if dataset else 0.0,
         "adapter_dir": adapter_dir,
         "base_model_id": args.base_model_id,
