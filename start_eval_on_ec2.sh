@@ -91,10 +91,9 @@ fi
 echo "🧪 Running evaluation..."
 python eval_gemma.py \
   --eval_jsonl "$EVAL_JSONL" \
-  --image_base_dir "$IMAGE_BASE" \
-  --adapter_dir "$ADAPTER_DIR" \
+  --image_base "$IMAGE_BASE" \
+  --adapter_path "$ADAPTER_DIR" \
   --output_dir "$OUTPUT_DIR" \
-  --load_in_4bit \
   $MAX_SAMPLES_ARG
 
 echo "✅ Evaluation job finished."
