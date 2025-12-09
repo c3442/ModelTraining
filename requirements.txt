@@ -4,9 +4,11 @@
 tensorboard
 
 # Transformers (Gemma release branch compatible)
-transformers>=4.51.3
+transformers>=5.0.0rc0
+timm
 
 # Hugging Face ecosystem
+huggingface_hub
 datasets==3.3.2
 accelerate==1.4.0
 evaluate==0.4.3

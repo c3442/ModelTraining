@@ -1,0 +1,7 @@
+{
+  "precision": 0.2353,
+  "recall": 0.0899,
+  "f1_score": 0.1301,
+  "mae_ingredients_grams": 49.0,
+  "mae_total_dish_grams": 138.72
+}
