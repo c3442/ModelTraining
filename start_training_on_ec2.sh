@@ -2,93 +2,85 @@
 set -e
 
 echo "=================================================="
-echo "🚀 Starting AWS A100 Training Bootstrap"
+echo "🚀 Starting AWS Training Bootstrap"
 echo "=================================================="
 
+if [ -z "$HF_TOKEN" ]; then
+  echo "❌ ERROR: HF_TOKEN environment variable is not set."
+  echo "   Please run: export HF_TOKEN=your_token_here"
+  echo "   before running this script."
+  exit 1
+fi
+echo "✅ HF_TOKEN is set."
+
 # -------------------------------
-# Basic environment
+# Environment Setup
 # -------------------------------
 export CUDA_VISIBLE_DEVICES=0
 export TOKENIZERS_PARALLELISM=false
-
-# -------------------------------
-# Hugging Face Authentication
-# Need to set manually $HF_TOKEN on the machine
-# -------------------------------
-export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN   # for compatibility with older libs
+export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN
 export HF_HOME=$HOME/.cache/huggingface
 mkdir -p $HF_HOME
-
-# -------------------------------
-# Project setup
-# -------------------------------
 mkdir -p ~/train
 cd ~/train
 
-echo "📥 Downloading training files from S3..."
+# -------------------------------
+# System Dependencies (Skipped if already installed)
+# -------------------------------
+# Checking for nvcc to see if we need to install system packages
+if ! command -v nvcc &> /dev/null; then
+    echo "⚙️ Installing System Dependencies and CUDA..."
+    sudo dnf install -y python3.12 python3.12-pip python3.12-devel git make cmake ninja-build gcc gcc-c++
+    sudo dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+    sudo dnf clean all
+    sudo dnf install -y cuda-toolkit-12-4
+else
+    echo "✅ CUDA Toolkit found. Skipping system install."
+fi
 
+export CUDA_HOME=/usr/local/cuda-12.4
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+# -------------------------------
+# Python Environment
+# -------------------------------
+if [ ! -d "venv312" ]; then
+    echo "🐍 Creating new virtual environment..."
+    python3.12 -m venv venv312
+fi
+
+source venv312/bin/activate
+pip install --upgrade pip
+
+# -------------------------------
+# Smart Installation Logic
+# -------------------------------
+
+echo "📥 Syncing scripts..."
 aws s3 cp s3://8up-model-training/script/fine_tune_gemma.py .
 aws s3 cp s3://8up-model-training/script/requirements.txt .
 
-# -------------------------------
-# Python environment
-# -------------------------------
-sudo dnf install -y python3.12 python3.12-pip python3.12-devel
-sudo dnf groupinstall -y "Development Tools"
-sudo dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
-sudo dnf clean all
-sudo dnf install -y cuda-toolkit-12-4
-
-# Set the CUDA Home directory (default install location)
-export CUDA_HOME=/usr/local/cuda-12.4
-# Add the compiler (nvcc) to your PATH
-export PATH=${CUDA_HOME}/bin:${PATH}
-# Add the libraries to your Library Path
-export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
-
-#if [ ! -d "venv" ]; then
-#  echo "🐍 Creating virtual environment..."
-#  python3.12 -m venv venv312
-#fi
-
-echo "🐍 Creating virtual environment..."
-python3.12 -m venv venv312
-source venv312/bin/activate
-
-echo "📦 Installing dependencies..."
-pip install --upgrade pip
-
-# Install build tools
-sudo dnf install -y gcc gcc-c++ git make cmake ninja-build kernel-devel
+echo "📦 Updating standard requirements..."
+# We install standard reqs every time (it's fast if nothing changed)
 pip install psutil packaging wheel setuptools ninja numpy
+pip install -r requirements.txt
 pip install "torch>=2.6" torchvision --index-url https://download.pytorch.org/whl/cu124
-# This installs Flash Attention from source, building it against PyTorch 2.9 + CUDA 13
-pip install flash-attn==2.8.3 --no-build-isolation --no-cache-dir
-# pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp39-cp39-linux_x86_64.whl
 
-echo "📦 Installing remaining dependencies with no-build-isolation..."
-export FLASH_ATTENTION_FORCE_CUDA_ARCH="8.6"
-export CUDA_HOME=/usr/local/cuda-12.9
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-pip install -r requirements.txt --no-build-isolation --no-cache-dir
+# CHECK IF FLASH ATTENTION IS ALREADY INSTALLED
+if python -c "import flash_attn" 2>/dev/null; then
+    echo "✅ Flash Attention is already installed and working. Skipping build."
+else
+    echo "⚠️ Flash Attention NOT found. Compiling from source (This takes ~10 mins)..."
 
-# -------------------------------
-# Sanity checks
-# -------------------------------
-echo "✅ Python version:"
-python --version
+    export FLASH_ATTENTION_FORCE_CUDA_ARCH="8.0;8.6"
 
-echo "✅ CUDA check:"
-python - <<EOF
-import torch
-print("CUDA available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("GPU:", torch.cuda.get_device_name(0))
-EOF
+    # Remove the --no-cache-dir flag so if it builds once, it saves the wheel locally for next time
+    pip install flash-attn==2.8.3 --no-build-isolation
+fi
 
 # -------------------------------
-# Launch training
+# Launch Training
 # -------------------------------
 echo "🔥 Starting training..."
 python fine_tune_gemma.py

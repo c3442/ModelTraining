@@ -334,11 +334,15 @@ def main():
         lora_dropout=0.05,
         r=16,
         bias="none",
-        target_modules="all-linear",
         task_type="CAUSAL_LM",
-        modules_to_save=[
-            "lm_head",
-            "embed_tokens",
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj"
         ],
     )
 
