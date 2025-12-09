@@ -20,7 +20,6 @@ from huggingface_hub import login
 from peft import PeftModel
 from transformers import (
     AutoProcessor,
-    AutoModelForCausalLM,
     AutoModelForImageTextToText,
     BitsAndBytesConfig,
 )
@@ -53,8 +52,8 @@ Extract foods from the image and apply the following rules strictly.
 DEFAULT_EVAL_JSONL = ["/Users/linliao/Dev/8up/data/training_nutrition5k/test.jsonl"]
 DEFAULT_IMAGE_BASE = "/Users/linliao/Dev/8up/data/nutrition5k/images/realsense_overhead"
 DEFAULT_MODEL_DIR = "gemma3-nutrition5k-vision-qlora"
-DEFAULT_BASE_MODEL_ID = "google/gemma-3n-E4B-it"
-DEFAULT_PROCESSOR_ID = "google/gemma-3n-E4B-it"
+DEFAULT_BASE_MODEL_ID = "google/gemma-3n-E4B-it"  # "google/gemma-3-4b-it"  #
+DEFAULT_PROCESSOR_ID = "google/gemma-3n-E4B-it"  # "google/gemma-3-4b-it"  #
 DEFAULT_OUTPUT_DIR = "eval-results"
 
 
@@ -217,8 +216,7 @@ def main():
     #     bnb_4bit_compute_dtype=torch.bfloat16,
     # )
 
-    # model = AutoModelForImageTextToText.from_pretrained(
-    model = AutoModelForCausalLM.from_pretrained(
+    model = AutoModelForImageTextToText.from_pretrained(
         args.base_model_id,
         # quantization_config=quant_config,
         device_map="auto",

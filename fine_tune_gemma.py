@@ -46,8 +46,8 @@ from trl import SFTConfig, SFTTrainer
 # Defaults – tweak if needed
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL_ID = "google/gemma-3-4b-pt"     # vision-capable base
-DEFAULT_PROCESSOR_ID = "google/gemma-3-4b-it"
+DEFAULT_MODEL_ID = "google/gemma-3n-E4B-it"     # vision-capable base
+DEFAULT_PROCESSOR_ID = "google/gemma-3n-E4B-it"
 
 # DEFAULT_TRAIN_JSONL = ["s3://8up-model-training/training_nutrition5k/test.jsonl"]
 DEFAULT_TRAIN_JSONL = [
@@ -283,7 +283,7 @@ def main():
 
     # Ensure CUDA + bf16-friendly GPU (e.g., A100)
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA GPU is required for this script (A100 recommended).")
+        raise RuntimeError("CUDA GPU is required for this script.")
 
     major_cc = torch.cuda.get_device_capability()[0]
     if major_cc < 8:
