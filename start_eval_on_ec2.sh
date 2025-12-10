@@ -28,15 +28,23 @@ echo "📥 Downloading evaluation files from S3..."
 aws s3 cp s3://8up-model-training/script/eval_gemma.py .
 aws s3 cp s3://8up-model-training/script/requirements.txt .
 
-# Optional: pull a fine-tuned adapter from S3 if provided
-if [ -n "$ADAPTER_S3" ]; then
-  echo "📦 Syncing adapter from $ADAPTER_S3 ..."
-  aws s3 sync "$ADAPTER_S3" "${ADAPTER_DIR:-gemma3-nutrition5k-vision-qlora}"
-fi
-
 # -------------------------------
 # Python environment
 # -------------------------------
+export CUDA_HOME=/usr/local/cuda-12.4
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+# -------------------------------
+# Python Environment
+# -------------------------------
+if [ ! -d "venv312" ]; then
+    echo "🐍 Creating new virtual environment..."
+    python3.12 -m venv venv312
+fi
+
+source ~/train/venv312/bin/activate
+
 #if [ ! -d "venv" ]; then
 #  echo "🐍 Creating virtual environment..."
 #  python3 -m venv venv
@@ -59,7 +67,7 @@ fi
 #export PATH=$CUDA_HOME/bin:$PATH
 #export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 #pip install -r requirements.txt --no-build-isolation --no-cache-dir
-source ~/train/venv/bin/activate
+#source ~/train/venv/bin/activate
 
 # -------------------------------
 # Sanity checks
@@ -78,10 +86,11 @@ EOF
 # -------------------------------
 # Launch evaluation
 # -------------------------------
-EVAL_JSONL=${EVAL_JSONL:-"s3://8up-model-training/training_nutrition5k/test.jsonl"}
+EVAL_JSONL=${EVAL_JSONL:-"s3://8up-model-training/training_nutrition5k/batch_3.jsonl"}
 IMAGE_BASE=${IMAGE_BASE:-"s3://8up-model-training/images_nutrition5k"}
 # ADAPTER_DIR=${ADAPTER_DIR:-"gemma3-nutrition5k-vision-qlora"}   # leave empty for baseline
-ADAPTER_DIR=""
+# ADAPTER_DIR=""
+ADAPTER_DIR=~/train/gemma3-nutrition5k-vision-qlora
 OUTPUT_DIR=${OUTPUT_DIR:-"eval-results"}
 MAX_SAMPLES_ARG=""
 if [ -n "$MAX_SAMPLES" ]; then
