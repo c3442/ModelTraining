@@ -152,15 +152,47 @@ def process_vision_info(messages: List[Dict], image_base_dir: str) -> List[Image
 # ---------------------------------------------------------------------------
 # Collate fn – uses processor.apply_chat_template + vision loader
 # ---------------------------------------------------------------------------
-
 def make_collate_fn(processor, image_base_dir: str):
     """
     Returns a collate_fn compatible with SFTTrainer.
 
     - Uses processor.apply_chat_template to build text from "messages"
     - Uses process_vision_info to load images from S3/local
-    - Masks padding + image tokens in labels
+    - Masks:
+        * padding tokens
+        * image tokens
+        * ALL tokens before the first <start_of_turn>model
+          (so loss is only on the assistant/model answer)
     """
+
+    tokenizer = processor.tokenizer
+
+    # --- Precompute marker + image token ids once for efficiency ----------------
+
+    # Gemma-3 chat template typically uses "<start_of_turn>model"
+    model_start_text = "<start_of_turn>model"
+    model_start_ids = tokenizer.encode(
+        model_start_text,
+        add_special_tokens=False,
+    )
+    model_start_ids = torch.tensor(model_start_ids, dtype=torch.long)
+
+    # Try to get image token id in a robust way
+    image_token_ids = []
+    # Most Gemma vision processors expose something like tokenizer.image_token
+    image_token_attr = getattr(tokenizer, "image_token", None)
+    if image_token_attr is not None:
+        image_token_ids.append(tokenizer.convert_tokens_to_ids(image_token_attr))
+
+    # As a fallback, check additional_special_tokens for something that looks like an image token
+    for tok in getattr(tokenizer, "additional_special_tokens", []):
+        if "image" in tok.lower():  # heuristic, but works in practice
+            image_token_ids.append(tokenizer.convert_tokens_to_ids(tok))
+
+    image_token_ids = list(set([i for i in image_token_ids if i is not None]))  # dedup + clean
+    image_token_ids_tensor = torch.tensor(image_token_ids, dtype=torch.long) if image_token_ids else None
+
+    pad_token_id = tokenizer.pad_token_id
 
     def collate_fn(examples):
         texts: List[str] = []
@@ -168,6 +200,11 @@ def make_collate_fn(processor, image_base_dir: str):
 
         for example in examples:
             msgs = example["messages"]
+
+            # For Gemma-3n, assistant role should be "model"
+            for m in msgs:
+                if m.get("role") == "assistant":
+                    m["role"] = "model"
 
             # Load all image(s) for this example
             image_inputs = process_vision_info(msgs, image_base_dir)
@@ -189,21 +226,41 @@ def make_collate_fn(processor, image_base_dir: str):
             padding=True,
         )
 
-        # Labels = input_ids, but with padding + image tokens masked to -100
-        labels = batch["input_ids"].clone()
+        input_ids = batch["input_ids"]
+        labels = input_ids.clone()
 
-        # Image token id(s)
-        image_token_id = [
-            processor.tokenizer.convert_tokens_to_ids(
-                processor.tokenizer.special_tokens_map["boi_token"]
-            )
-        ]
+        # 1) Mask padding tokens
+        labels[labels == pad_token_id] = -100
 
-        # Mask padding tokens
-        labels[labels == processor.tokenizer.pad_token_id] = -100
-        # Mask image tokens
-        labels[torch.isin(labels, torch.tensor(image_token_id))] = -100
-        # Extra special token used by the Gemma guide
+        # 2) Mask image tokens (if we found any ids)
+        if image_token_ids_tensor is not None and image_token_ids_tensor.numel() > 0:
+            # torch.isin works elementwise between labels and the id set
+            mask_image = torch.isin(labels, image_token_ids_tensor.to(labels.device))
+            labels[mask_image] = -100
+
+        # 3) Mask everything before the first <start_of_turn>model in each sequence
+        #    This assumes exactly: [user turn] then [model turn] (Nutrition5k-style)
+        B, T = labels.shape
+        ms_ids = model_start_ids.to(labels.device)
+        ms_len = ms_ids.shape[0]
+
+        for b in range(B):
+            seq = labels[b]
+
+            # Find first occurrence of model_start_ids in seq
+            start_idx = None
+            for t in range(0, T - ms_len + 1):
+                if torch.equal(seq[t:t + ms_len], ms_ids):
+                    start_idx = t
+                    break
+
+            if start_idx is not None:
+                # Everything *before* (and including) the model start marker
+                # is treated as context, not supervised.
+                # If you want to supervise the marker token itself, change to seq[:start_idx] = -100
+                seq[: start_idx + ms_len] = -100
+
+        # (Optional) keep this if you know 262144 is another special token you want to ignore
         labels[labels == 262144] = -100
 
         batch["labels"] = labels
