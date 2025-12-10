@@ -89,8 +89,8 @@ EOF
 EVAL_JSONL=${EVAL_JSONL:-"s3://8up-model-training/training_nutrition5k/batch_3.jsonl"}
 IMAGE_BASE=${IMAGE_BASE:-"s3://8up-model-training/images_nutrition5k"}
 # ADAPTER_DIR=${ADAPTER_DIR:-"gemma3-nutrition5k-vision-qlora"}   # leave empty for baseline
-# ADAPTER_DIR=""
-ADAPTER_DIR=~/train/gemma3-nutrition5k-vision-qlora
+ADAPTER_DIR=""
+# ADAPTER_DIR=~/train/gemma3-nutrition5k-vision-qlora
 OUTPUT_DIR=${OUTPUT_DIR:-"eval-results"}
 MAX_SAMPLES_ARG=""
 if [ -n "$MAX_SAMPLES" ]; then
